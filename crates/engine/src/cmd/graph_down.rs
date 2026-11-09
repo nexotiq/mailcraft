@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mailcraft_model::sync::{GraphMessage, GraphProgress, MessagePage, ServerMessage, merge_categories};
+use mailcraft_model::sync::{GraphMessage, GraphProgress, MessagePage, ServerMessage, listed_from, merge_categories};
 use mailcraft_model::time::Timestamp;
 use mailcraft_model::{Body, FolderKind, Id, Mailbox, Message, OfflineWindow};
 
@@ -209,6 +209,7 @@ pub fn take_page(mb: &mut Mailbox, index: &mut ServerIndex, account: Id, page: &
         s.round_ended = sorting || page.caught_up;
         // The counts the link was got with, or none (#276): a new link never keeps the old one's.
         s.counts = page.counts;
+        s.since = page.since;
     }
 }
 
@@ -369,6 +370,53 @@ pub fn sweep(mb: &mut Mailbox, account: Id, down: &mut Down) {
     for m in mb.messages.values_mut() {
         if m.account == account && m.returned > 0 {
             std::sync::Arc::make_mut(m).returned -= 1;
+        }
+    }
+}
+
+/// Mail of `account` received before it now lists from ([`Mailbox::listed_since`], #143), in a
+/// folder whose round was begun from a time: left on the server, so marked gone for [`sweep`].
+/// Older mail that the new round didn't list (it was read afresh) is gone already. Kept, and no
+/// longer gone, whatever has a change here that the server hasn't taken yet, and what the mail to
+/// keep offline always keeps (a draft, one held, moved here and not there yet, being moved out,
+/// put back after a refused copy): it goes once the server has it as it is here. Run at the end of
+/// a whole run, before the sweep.
+pub fn leave_on_server(mb: &mut Mailbox, account: Id, now: Timestamp, today: Timestamp) {
+    let Some(cut) = mb.listed_since(account, now) else { return };
+    // The folders read from a time, by server id; the Drafts and the Outbox never are.
+    let filtered: HashMap<String, Id> = mb
+        .folders
+        .iter()
+        .filter(|f| f.account == account && listed_from(f.kind, Some(cut)).is_some())
+        .filter_map(|f| f.server.as_ref().filter(|s| s.since.is_some()).map(|s| (s.id.clone(), f.id)))
+        .collect();
+    if filtered.is_empty() {
+        return;
+    }
+    for m in mb.messages.values_mut() {
+        if m.account != account {
+            continue;
+        }
+        let Some(server) = m.server.as_ref().filter(|s| !s.id.is_empty()) else { continue };
+        // On the server in a folder read from a time.
+        let Some(there) = filtered.get(server.folder.as_str()) else { continue };
+        let received = if m.received != 0 { m.received } else { m.date };
+        if received == 0 || received >= cut {
+            continue;
+        }
+        // (Moved here and not there yet: the move goes up first.)
+        let kept = *there != m.folder
+            || m.draft
+            || !m.held.is_empty()
+            || m.incomplete
+            || m.moving_out.is_some()
+            || m.server_draft.is_some()
+            || m.returned > 0
+            || super::graph_up::update_of(m, server, today, now).is_some();
+        if server.gone == kept
+            && let Some(s) = std::sync::Arc::make_mut(m).server.as_mut()
+        {
+            s.gone = !kept;
         }
     }
 }

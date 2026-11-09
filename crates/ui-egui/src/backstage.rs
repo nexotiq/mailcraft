@@ -337,6 +337,20 @@ fn info(app: &mut MailApp, ui: &mut Ui, t: &Tokens) {
                 ui.label(tl!("Mail to keep offline:"));
                 crate::keep_offline::slider(app, ui, a.id, a.keep_offline);
             });
+            // Older mail on the server alone, as Outlook keeps it (#143).
+            if a.keep_offline != mailcraft_model::KeepOffline::All {
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    let mut on = a.older_on_server;
+                    let shown = ui.checkbox(&mut on, tl!("Leave older mail on the server")).on_hover_text(tl!(
+                        "Mail older than this isn't kept on this computer at all, not even its headers, as in Outlook. It stays on the server. The next Send/Receive lists the folders again."
+                    ));
+                    app.hit.add("olderOnServer", a.id, shown.rect);
+                    if shown.changed() {
+                        let _ = app.execute("account.edit", json!({"id": a.id, "olderOnServer": on}));
+                    }
+                });
+            }
             ui.add_space(8.0);
         }
         // A mailbox of the organisation that the owner was given Full Access to (#70).

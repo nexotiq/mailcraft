@@ -13,6 +13,7 @@ use crate::{
     Action, Answers, Calendar, Contact, Event, EwsServer, Id, JmapServer, KeepOffline, Message, ModelError, Rgb, Rule, Signature, Task, ThreadIndex,
     clean_name,
 };
+use mailcraft_time::Timestamp;
 
 /// Deepest a folder tree may nest (a hostile file could otherwise chain folders without end).
 const MAX_DEPTH: usize = 32;
@@ -184,6 +185,11 @@ pub struct ServerFolder {
     /// False until a listing says so.
     #[serde(skip_serializing_if = "is_false", deserialize_with = "crate::sync::lenient_or_default")]
     pub well_known: bool,
+    /// For a folder of a Microsoft account: the received time its delta round was begun from
+    /// (`$filter=receivedDateTime ge`, [`Mailbox::listed_since`]); `None` for a round that lists
+    /// every message. A round begun from later than the account now lists from is begun afresh.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "crate::sync::lenient")]
+    pub since: Option<Timestamp>,
 }
 
 /// A folder's message counts as its server's listing gives them (#276).
@@ -362,6 +368,13 @@ pub struct Account {
     /// mailbox follows its owner's ([`Mailbox::keep_offline_of`]).
     #[serde(skip_serializing_if = "KeepOffline::is_default", deserialize_with = "crate::sync::lenient_or_default")]
     pub keep_offline: KeepOffline,
+    /// For a Microsoft account: mail older than [`Account::keep_offline`] is left on the server,
+    /// as Outlook's Cached Exchange Mode does: each folder's delta lists only mail received within
+    /// the window, so nothing of the older mail is kept here, not even its headers (#143). False
+    /// (the default, and a file from before) keeps the headers and preview of older mail. A shared
+    /// mailbox follows its owner's ([`Mailbox::listed_since`]).
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "crate::sync::lenient_or_default")]
+    pub older_on_server: bool,
     /// For a Microsoft account still kept in step by IMAP: what its owner said to switching it
     /// to Microsoft Graph (R3.7). Nothing for every other account.
     #[serde(skip_serializing_if = "GraphSwitch::is_default", deserialize_with = "crate::sync::lenient_or_default")]
@@ -1417,6 +1430,16 @@ impl Mailbox {
     /// (#143: it has none of its own). All for an account that isn't here.
     pub fn keep_offline_of(&self, account: Id) -> KeepOffline {
         self.owner_of(account).or(self.account(account)).map(|a| a.keep_offline).unwrap_or_default()
+    }
+
+    /// The received time from which `account`'s folders are listed at `now`
+    /// ([`Account::older_on_server`]): the start of its mail to keep offline, at 00:00 UTC of that
+    /// day, so that it moves once a day. `None` when every message is listed: the switch off, or
+    /// the window All. A shared mailbox follows its owner's.
+    pub fn listed_since(&self, account: Id, now: Timestamp) -> Option<Timestamp> {
+        let a = self.owner_of(account).or(self.account(account))?;
+        let since = a.older_on_server.then(|| self.keep_offline_of(account).since(now)).flatten()?;
+        Some(since - since.rem_euclid(86_400))
     }
 
     /// Whether Delete on a whole conversation of `account`'s asks first (#503): its own switch,

@@ -288,6 +288,7 @@ pub(crate) fn take_page(mb: &mut Mailbox, index: &mut ServerIndex, account: Id, 
         caught_up: false,
         afresh: page.afresh,
         counts: None,
+        since: None,
     };
     graph_down::take_page(mb, index, account, &as_page, down);
     if !page.state.is_empty()

@@ -5601,6 +5601,11 @@ msgid "Leave it empty to look for the server from your address. It must begin wi
 msgstr ""
 
 #. interface
+#: crates/ui-egui/src/backstage.rs
+msgid "Leave older mail on the server"
+msgstr ""
+
+#. interface
 #: crates/ui-egui/src/sync_panel.rs
 #, fuzzy
 msgid "Leave this account out of this Send/Receive"
@@ -5831,6 +5836,11 @@ msgstr "La posta in Posta in uscita di questa cassetta postale condivisa è in a
 #, fuzzy
 msgid "Mail moves and copies between a shared mailbox and its own account's mailboxes only: move it there, or into a folder on this computer"
 msgstr "La posta si sposta e si copia solo tra una cassetta postale condivisa e le cassette postali del suo account: spostarla lì, o in una cartella su questo computer"
+
+#. interface
+#: crates/ui-egui/src/backstage.rs
+msgid "Mail older than this isn't kept on this computer at all, not even its headers, as in Outlook. It stays on the server. The next Send/Receive lists the folders again."
+msgstr ""
 
 #. interface
 #: crates/ui-egui/src/data_removal.rs

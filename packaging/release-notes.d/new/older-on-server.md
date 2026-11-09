@@ -1,0 +1,1 @@
+- A Microsoft account can leave mail older than Mail to keep offline on the server, as Outlook does: File › Info, Leave older mail on the server. Its folders then list only the mail within the window, so the first Send/Receive of a large mailbox is much shorter and the mailbox file much smaller ([#143](https://github.com/GITHUB_REPOSITORY/issues/143)).

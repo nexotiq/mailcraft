@@ -25,7 +25,7 @@ use crate::{CmdError, CmdResult, CommandSpec, Session, p};
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("account.add", "Add Account", "File › Info", add).params(ACCOUNT),
-        CommandSpec::new("account.edit", "Account Settings", "File › Info", edit).params(r#"{"id": number, …the fields of account.add, "downloadInFull"?: "upTo10Mb"|"upTo25Mb"|"upTo50Mb"|"everything" (a Microsoft account: which messages are fetched whole in the background), "keepOffline"?: "3d"|"1w"|"2w"|"1m"|"3m"|"6m"|"12m"|"2y"|"5y"|"10y"|"all" (a Microsoft account's mail to keep offline: how far back, by received date, mail is kept in full on this computer; older mail keeps its headers and preview. A shared mailbox follows its owner's. Shortening it removes nothing by itself: account.thinOffline does), "askBeforeDeletingConversation"?: bool (Delete on a conversation's row that takes more than one message, in its folder or found by a search, asks first in the window; on unless turned off. A shared mailbox follows its owner's), "showGmailCategories"?: bool (a Gmail account: the folder pane shows Gmail's categories, Primary, Social, Promotions, Updates and Forums, under its Inbox; on unless turned off), "alertPrimaryOnly"?: bool (a Gmail account: a desktop alert only for new mail in Gmail's Primary category; off unless turned on)}"#),
+        CommandSpec::new("account.edit", "Account Settings", "File › Info", edit).params(r#"{"id": number, …the fields of account.add, "downloadInFull"?: "upTo10Mb"|"upTo25Mb"|"upTo50Mb"|"everything" (a Microsoft account: which messages are fetched whole in the background), "keepOffline"?: "3d"|"1w"|"2w"|"1m"|"3m"|"6m"|"12m"|"2y"|"5y"|"10y"|"all" (a Microsoft account's mail to keep offline: how far back, by received date, mail is kept in full on this computer; older mail keeps its headers and preview. A shared mailbox follows its owner's. Shortening it removes nothing by itself: account.thinOffline does), "olderOnServer"?: bool (a Microsoft account: mail older than keepOffline is left on the server, as Outlook does: each folder lists only mail received within it, and the next Send/Receive lists the folders afresh, removing the older mail's headers here; off keeps them. A shared mailbox follows its owner's), "askBeforeDeletingConversation"?: bool (Delete on a conversation's row that takes more than one message, in its folder or found by a search, asks first in the window; on unless turned off. A shared mailbox follows its owner's), "showGmailCategories"?: bool (a Gmail account: the folder pane shows Gmail's categories, Primary, Social, Promotions, Updates and Forums, under its Inbox; on unless turned off), "alertPrimaryOnly"?: bool (a Gmail account: a desktop alert only for new mail in Gmail's Primary category; off unless turned on)}"#),
         CommandSpec::new("account.forgetEwsCertificate", "Forget Trusted Certificate", "File › Info", forget_ews_certificate)
             .params(r#"{"id": number} — an Exchange server account stops trusting the one certificate it was told to trust although the system doesn't: its fingerprint is forgotten, so the server's certificate is judged by the system alone and the owner is asked again if it isn't trusted. Answers {"id": id, "forgotten": bool}"#),
         CommandSpec::new("account.remove", "Remove Account", "File › Info", remove).params(r#"{"id": number} — removes the account, its mail and what is kept for it on this computer (bodies and attachments leave the content folder once a state without it is saved; no Undo step is kept), and what came from its server: its events, contacts, to-dos and calendars (what was made here and not sent yet stays, as this computer's own), Outlook's list of categories, its rules (those its server keeps stay there; those for every account stay here), and, where the window's settings are kept (the window, not mailcraft-cli), its mailbox's working hours; nothing on the server is touched. Mail moved into it from elsewhere that its server wasn't given yet goes back to where it came from, and so does mail moved into it whose original another server keeps until the copy is safe; once the copy is safe on its server, that original goes as it would have (mail moved onto this computer goes back to its original, as its copy goes with the account). The only account leaves an empty mailbox, as at a first start. Answers {"deleted": id, "leftToSweep": n (content files the sweep removes later)}"#),
@@ -212,6 +212,12 @@ fn apply_fields(a: &mut Account, v: &Value) -> Result<(), CmdError> {
     if let Some(keep) = p::str(v, "keepOffline") {
         a.keep_offline =
             mailcraft_model::KeepOffline::parse(keep).ok_or_else(|| bad("`keepOffline` is 3d, 1w, 2w, 1m, 3m, 6m, 12m, 2y, 5y, 10y or all"))?;
+    }
+    // Older mail left on the server (#143).
+    match v.get("olderOnServer") {
+        None => {}
+        Some(Value::Bool(on)) => a.older_on_server = *on,
+        Some(_) => return Err(bad("`olderOnServer` is true or false")),
     }
     // Whether Delete on a whole conversation asks first (#503).
     match v.get("askBeforeDeletingConversation") {
@@ -525,7 +531,7 @@ fn edit(s: &mut Session, v: &Value) -> CmdResult {
     // A shared mailbox is its address, read with its owner's sign-in (#70): another address
     // would be another mailbox under the same folders' ids.
     if before.is_shared() {
-        if v.get("keepOffline").is_some() {
+        if v.get("keepOffline").is_some() || v.get("olderOnServer").is_some() {
             return Err(fail("a shared mailbox keeps as much mail offline as the account it is opened through: change that account's"));
         }
         if v.get("askBeforeDeletingConversation").is_some() {
@@ -692,7 +698,7 @@ fn list(s: &mut Session, _: &Value) -> CmdResult {
         .accounts_in_order()
         .into_iter()
         .map(|a| {
-            json!({"id": a.id, "name": a.name, "email": a.email, "displayName": a.display_name, "kind": a.kind, "username": a.username, "incoming": a.incoming, "outgoing": a.outgoing, "signature": a.signature, "replySignature": a.reply_signature(), "auth": if a.oauth.is_some() { "oauth2" } else { "password" }, "oauth": a.oauth, "downloadInFull": a.download_in_full, "keepOffline": s.mailbox.keep_offline_of(a.id), "askBeforeDeletingConversation": s.mailbox.asks_before_deleting_conversation(a.id), "gmail": a.is_gmail(), "showGmailCategories": a.shows_gmail_categories(), "alertPrimaryOnly": a.is_gmail() && a.alert_primary_only, "sharedOf": a.shared_of, "jmap": jmap_shown(a), "ews": ews_shown(a)})
+            json!({"id": a.id, "name": a.name, "email": a.email, "displayName": a.display_name, "kind": a.kind, "username": a.username, "incoming": a.incoming, "outgoing": a.outgoing, "signature": a.signature, "replySignature": a.reply_signature(), "auth": if a.oauth.is_some() { "oauth2" } else { "password" }, "oauth": a.oauth, "downloadInFull": a.download_in_full, "keepOffline": s.mailbox.keep_offline_of(a.id), "olderOnServer": s.mailbox.owner_of(a.id).unwrap_or(a).older_on_server, "askBeforeDeletingConversation": s.mailbox.asks_before_deleting_conversation(a.id), "gmail": a.is_gmail(), "showGmailCategories": a.shows_gmail_categories(), "alertPrimaryOnly": a.is_gmail() && a.alert_primary_only, "sharedOf": a.shared_of, "jmap": jmap_shown(a), "ews": ews_shown(a)})
         })
         .collect();
     Ok(json!({"accounts": accounts, "signatures": s.mailbox.signatures}))

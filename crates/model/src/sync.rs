@@ -971,6 +971,17 @@ pub struct GraphMailRequest {
     /// asked for those ids after the rest of the run, at most [`MAX_THREAD_ASKS`] (#795).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub threads: Vec<String>,
+    /// A folder read from its start is listed from this received time on
+    /// (`$filter=receivedDateTime ge`, [`crate::Mailbox::listed_since`]); `None` lists everything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
+}
+
+/// The received time a folder of `kind` is listed from when its account lists from `since`
+/// ([`crate::Mailbox::listed_since`], #143): the Drafts and the Outbox list everything, as the
+/// mail to keep offline always keeps theirs.
+pub fn listed_from(kind: FolderKind, since: Option<Timestamp>) -> Option<Timestamp> {
+    since.filter(|_| !matches!(kind, FolderKind::Drafts | FolderKind::Outbox))
 }
 
 /// Most changes of messages one Graph run is asked to make; more go over several runs.
@@ -1118,6 +1129,9 @@ pub struct GraphLink {
     /// be passed over (#276).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counts: Option<FolderCounts>,
+    /// The received time the link's round was begun from ([`crate::ServerFolder::since`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
 }
 
 /// A message as a folder's delta gives it: what the message list needs (R3 spec S9).
@@ -1176,6 +1190,9 @@ pub struct MessagePage {
     /// and the counts kept for the folder are forgotten with its old link.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counts: Option<FolderCounts>,
+    /// The received time the page's round was begun from ([`crate::ServerFolder::since`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
 }
 
 /// A message's read state as a folder's delta says it alone.

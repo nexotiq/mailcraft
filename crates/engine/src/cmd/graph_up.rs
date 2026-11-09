@@ -123,7 +123,7 @@ fn same_categories(a: &[String], b: &[String]) -> bool {
 }
 
 /// The properties of `m` changed here since `server` said, as one change.
-fn update_of(m: &Message, server: &ServerMessage, today: Timestamp, now: Timestamp) -> Option<MessageChange> {
+pub(super) fn update_of(m: &Message, server: &ServerMessage, today: Timestamp, now: Timestamp) -> Option<MessageChange> {
     let read = (m.read != server.read).then_some(m.read);
     let flag_changed = m.flag != server.flag || (m.flag == FlagStatus::Flagged && m.flag_due != server.flag_due);
     let flag = flag_changed.then(|| match m.flag {

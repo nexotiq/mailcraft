@@ -55,9 +55,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use mailcraft_model::sync::{
-    GraphFolder, GraphMailRequest, GraphMailResult, GraphMessage, GraphProgress, MessagePage, ReadState, ServerMessage, SyncPhase, Timings,
+    GraphFolder, GraphLink, GraphMailRequest, GraphMailResult, GraphMessage, GraphProgress, MessagePage, ReadState, ServerMessage, SyncPhase,
+    Timings, listed_from,
 };
 use mailcraft_model::{Address, FlagStatus, FolderCounts, FolderKind, Importance};
+use mailcraft_time::{DateTime, Timestamp};
 use serde_json::Value;
 
 use super::super::pace::Kind;
@@ -114,6 +116,9 @@ struct Reading {
     listed: Option<FolderCounts>,
     /// Passed over: its counts are the ones kept with its delta link (#276).
     skipped: bool,
+    /// The received time its round was begun from (`$filter`): the kept link's, or for a round
+    /// begun in this run the request's (#143).
+    since: Option<Timestamp>,
 }
 
 /// The time and requests since the last piece was handed on, for the run's timings (#276).
@@ -155,6 +160,8 @@ struct Run {
     left: HashSet<String>,
     seen: HashSet<String>,
     overflow: bool,
+    /// The received time a round begun in this run lists from (#143).
+    since: Option<Timestamp>,
 }
 
 impl Run {
@@ -199,8 +206,7 @@ pub(super) fn messages(
     emit: &mut dyn FnMut(GraphMailResult),
 ) -> GraphMailResult {
     let mut out = GraphMailResult { account: request.account, email: request.email.clone(), ..Default::default() };
-    let links: HashMap<&str, (&str, bool, Option<FolderCounts>)> =
-        request.links.iter().map(|l| (l.folder.as_str(), (l.link.as_str(), l.caught_up, l.counts))).collect();
+    let links: HashMap<&str, &GraphLink> = request.links.iter().map(|l| (l.folder.as_str(), l)).collect();
     // The Inbox pass lists nothing: its folder's counts are none of the server's.
     let listing = !phase_is_inbox(phase);
     let mut folders: Vec<GraphFolder> = listed.to_vec();
@@ -208,12 +214,12 @@ pub(super) fn messages(
     let mut reading: Vec<Reading> = folders
         .into_iter()
         .map(|folder| {
-            let (link, caught_up, afresh, kept) = match links.get(folder.id.as_str()) {
-                None => (None, false, false, None),
+            let (link, caught_up, afresh, kept, since) = match links.get(folder.id.as_str()) {
+                None => (None, false, false, None, listed_from(folder.kind, request.since)),
                 // A link from the mailbox file is followed only to Graph itself.
-                Some((link, caught_up, kept)) => match Url::parse_within(link, http::MAX_LONG_URL).ok().filter(|url| graph.base.same_server(url)) {
-                    Some(url) => (Some(url), *caught_up, false, kept.filter(|_| *caught_up)),
-                    None => (None, false, true, None),
+                Some(l) => match Url::parse_within(&l.link, http::MAX_LONG_URL).ok().filter(|url| graph.base.same_server(url)) {
+                    Some(url) => (Some(url), l.caught_up, false, l.counts.filter(|_| l.caught_up), l.since),
+                    None => (None, false, true, None, listed_from(folder.kind, request.since)),
                 },
             };
             let round_here = link.is_none() || caught_up;
@@ -234,6 +240,7 @@ pub(super) fn messages(
                 kept,
                 listed,
                 skipped: false,
+                since,
             };
             if listing && !request.full && unchanged(&one) {
                 (one.skipped, one.done) = (true, true);
@@ -246,7 +253,7 @@ pub(super) fn messages(
     // First the newest page of each (all of what changed, for one read to its end before), then
     // each to its end.
     let mut stopped = None;
-    let mut run = Run { tracking: reading.iter().any(|one| one.skipped), ..Default::default() };
+    let mut run = Run { tracking: reading.iter().any(|one| one.skipped), since: request.since, ..Default::default() };
     'passes: for (pass, first) in [(0, true), (1, false), (2, false)] {
         // After the rest: what left a folder read and turned up in none may be in a folder passed
         // over, so those are read after all (each from its delta link: as a rule, a page).
@@ -331,7 +338,12 @@ fn page(
         Some(url) => url.clone(),
         None => {
             // (Not the sizes: a delta refuses their expansion, see above.)
-            let query = http::form(&[("$select", FIELDS), ("$orderby", "receivedDateTime desc")]);
+            let mut query = vec![("$select", FIELDS.to_string()), ("$orderby", "receivedDateTime desc".to_string())];
+            // Mail received before the account's window is left on the server (#143).
+            if let Some(since) = one.since {
+                query.push(("$filter", format!("receivedDateTime ge {}Z", DateTime::from_timestamp(since, 0).iso())));
+            }
+            let query = http::form(&query.iter().map(|(k, v)| (*k, v.as_str())).collect::<Vec<_>>());
             graph.url(&format!("{}/{}/messages/delta?{query}", folders_of(graph), http::encode(&one.folder.id)))
         }
     };
@@ -350,6 +362,7 @@ fn page(
                 one.caught_up = false;
                 one.afresh = true;
                 one.round_here = true;
+                one.since = listed_from(one.folder.kind, run.since);
             }
             return Ok(());
         }
@@ -384,7 +397,8 @@ fn page(
             return Ok(());
         }
     };
-    let mut taken = MessagePage { folder: one.folder.id.clone(), afresh: std::mem::take(&mut one.afresh), caught_up, ..Default::default() };
+    let mut taken =
+        MessagePage { folder: one.folder.id.clone(), afresh: std::mem::take(&mut one.afresh), caught_up, since: one.since, ..Default::default() };
     for entry in entries.iter().take(1_000) {
         match entry_of(entry, &one.folder.id) {
             Some(Entry::Message(message)) => taken.messages.push(*message),

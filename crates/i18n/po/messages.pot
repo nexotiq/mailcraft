@@ -4897,6 +4897,11 @@ msgid "Leave it empty to look for the server from your address. It must begin wi
 msgstr ""
 
 #. interface
+#: crates/ui-egui/src/backstage.rs
+msgid "Leave older mail on the server"
+msgstr ""
+
+#. interface
 #: crates/ui-egui/src/sync_panel.rs
 msgid "Leave this account out of this Send/Receive"
 msgstr ""
@@ -5099,6 +5104,11 @@ msgstr ""
 #. what a command says
 #: crates/model/src/mailbox.rs
 msgid "Mail moves and copies between a shared mailbox and its own account's mailboxes only: move it there, or into a folder on this computer"
+msgstr ""
+
+#. interface
+#: crates/ui-egui/src/backstage.rs
+msgid "Mail older than this isn't kept on this computer at all, not even its headers, as in Outlook. It stays on the server. The next Send/Receive lists the folders again."
 msgstr ""
 
 #. interface

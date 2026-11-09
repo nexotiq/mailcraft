@@ -22,9 +22,10 @@ use std::collections::{HashMap, HashSet};
 
 use mailcraft_model::sync::{
     ChangeOutcome, FolderChange, FolderListing, GraphFetchRequest, GraphFetchResult, GraphFolder, GraphLink, GraphMailRequest, GraphMailResult,
-    MAX_DRAFTS, MAX_FOLDER_CHANGES, MAX_MESSAGE_CHANGES, MAX_PLACES, MessageOutcome, SendOutcome, SyncPhase,
+    MAX_DRAFTS, MAX_FOLDER_CHANGES, MAX_MESSAGE_CHANGES, MAX_PLACES, MessageOutcome, SendOutcome, SyncPhase, listed_from,
 };
 use mailcraft_model::{AccountKind, Folder, FolderKind, Id, Mailbox, Queued, ServerFolder, clean_name};
+use mailcraft_time::Timestamp;
 use serde_json::{Value, json};
 
 use super::graph_down::{self, Down};
@@ -68,6 +69,7 @@ pub fn graph_mail_request(s: &Session, account: Id) -> Result<GraphMailRequest, 
         return Err(failed!("{name} isn't kept in step through Microsoft Graph", name = a.name));
     }
     let shared = shared_mailbox(s, account)?;
+    let since = s.mailbox.listed_since(account, s.now());
     // A shared mailbox's changes, drafts and sends go up as its owner's do, at its own address
     // with its own ids (#70: the host asks `/users/{address}/…`, never `/me`): its drafts in its
     // own Drafts, what is sent from it through its own address, the copy in its Sent Items.
@@ -77,7 +79,7 @@ pub fn graph_mail_request(s: &Session, account: Id) -> Result<GraphMailRequest, 
         email: a.email.clone(),
         shared,
         changes: folder_changes(&s.mailbox, account, MAX_FOLDER_CHANGES).0,
-        links: links(&s.mailbox, account),
+        links: links(&s.mailbox, account, since),
         background: false,
         messages: graph_up::message_changes(s, account, MAX_MESSAGE_CHANGES).0,
         drafts,
@@ -88,6 +90,7 @@ pub fn graph_mail_request(s: &Session, account: Id) -> Result<GraphMailRequest, 
         full: full_sweep_due(s, account),
         // The conversation ids of mail listed before they were asked for (#795).
         threads: super::thread_ids::to_ask(&s.mailbox, account),
+        since,
     })
 }
 
@@ -115,12 +118,17 @@ pub fn graph_inbox_request(s: &Session, account: Id) -> Option<GraphMailRequest>
     let a = s.mailbox.account(account).filter(|a| a.kind == AccountKind::Microsoft)?;
     let shared = shared_mailbox(s, account).ok()?;
     let inbox = s.mailbox.folder_of_kind(account, FolderKind::Inbox).and_then(|id| s.mailbox.folder(id))?;
+    let since = s.mailbox.listed_since(account, s.now());
     let (id, links) = match inbox.server.as_ref()? {
         server if server.id.is_empty() => return None,
         server if server.delta.is_empty() => (server.id.clone(), Vec::new()),
-        server if server.caught_up => {
-            (server.id.clone(), vec![GraphLink { folder: server.id.clone(), link: server.delta.clone(), caught_up: true, counts: None }])
-        }
+        // A round begun from another time than the account now lists from is begun afresh by the
+        // run itself, which sweeps what the new one doesn't list (#143).
+        server if !fits(server.since, since) => return None,
+        server if server.caught_up => (
+            server.id.clone(),
+            vec![GraphLink { folder: server.id.clone(), link: server.delta.clone(), caught_up: true, counts: None, since: server.since }],
+        ),
         _ => return None,
     };
     Some(GraphMailRequest {
@@ -129,6 +137,7 @@ pub fn graph_inbox_request(s: &Session, account: Id) -> Option<GraphMailRequest>
         shared,
         links,
         inbox_pass: Some(GraphFolder { id, name: inbox.name.clone(), kind: FolderKind::Inbox, ..Default::default() }),
+        since,
         ..Default::default()
     })
 }
@@ -148,15 +157,39 @@ fn shared_mailbox(s: &Session, account: Id) -> Result<bool, CmdError> {
     Ok(true)
 }
 
-/// Where each folder of `account` that the server has goes on from (R3 spec S10).
-fn links(mb: &Mailbox, account: Id) -> Vec<GraphLink> {
+/// Where each folder of `account` that the server has goes on from (R3 spec S10). A folder whose
+/// round was begun from another received time than `since`, the one the account now lists from,
+/// is read afresh (#143): its link is sent as none of Graph's, which the run reads as one no
+/// longer taken, and what the new round doesn't list is swept at the end of a whole run.
+fn links(mb: &Mailbox, account: Id, since: Option<Timestamp>) -> Vec<GraphLink> {
     mb.folders
         .iter()
         .filter(|f| f.account == account)
-        .filter_map(|f| f.server.as_ref())
-        .filter(|s| !s.delta.is_empty())
-        .map(|s| GraphLink { folder: s.id.clone(), link: s.delta.clone(), caught_up: s.caught_up, counts: s.counts.filter(|_| s.caught_up) })
+        .filter_map(|f| f.server.as_ref().map(|s| (s, listed_from(f.kind, since))))
+        .filter(|(s, _)| !s.delta.is_empty())
+        .map(|(s, since)| match fits(s.since, since) {
+            true => GraphLink {
+                folder: s.id.clone(),
+                link: s.delta.clone(),
+                caught_up: s.caught_up,
+                counts: s.counts.filter(|_| s.caught_up),
+                since: s.since,
+            },
+            false => GraphLink { folder: s.id.clone(), ..Default::default() },
+        })
         .collect()
+}
+
+/// Whether a round begun from received time `begun` still serves an account that lists from
+/// `since` (#143): one that lists everything only by a round that did; one that lists from a time
+/// by a round begun from that time or earlier (the window moves on a day at a time, and what a
+/// round from earlier has more of is mail that was kept already).
+pub fn fits(begun: Option<Timestamp>, since: Option<Timestamp>) -> bool {
+    match (begun, since) {
+        (None, None) => true,
+        (Some(begun), Some(since)) => begun <= since,
+        _ => false,
+    }
 }
 
 /// How many changes made in `account` its server hasn't heard of yet ([`super::account::unpushed`]
@@ -417,6 +450,8 @@ pub fn apply_graph_mail(s: &mut Session, result: GraphMailResult) -> CmdResult {
     }
     // (Not after a listing cut short: what left a folder may be in one it missed, #305.)
     if result.whole && !result.inbox_pass && !s.graph_listed_short.contains(&account) {
+        let (now, today) = (s.now(), s.zone().instant(mailcraft_time::DateTime::at_midnight(s.today())));
+        graph_down::leave_on_server(&mut s.mailbox, account, now, today);
         graph_down::sweep(&mut s.mailbox, account, &mut down);
         // Every folder read and none passed over: the full sweep is done for the hour (#276).
         if !result.partial && result.timings.skipped == 0 {
@@ -567,6 +602,7 @@ pub(super) fn change_done(
                 counts: None,
                 sync_state: String::new(),
                 well_known: false,
+                since: None,
             });
             taken.pushed += 1;
             None
@@ -779,6 +815,7 @@ fn update(mb: &mut Mailbox, id: Id, there: &GraphFolder, name: &str, parent_here
         sync_state: last.sync_state,
         // (Once the server's own, always: one odd answer doesn't clear it.)
         well_known: own,
+        since: last.since,
     });
     *f != before
 }
@@ -802,3 +839,7 @@ mod sweep_tests;
 #[cfg(test)]
 #[path = "graph_inbox_first_tests.rs"]
 mod inbox_first_tests;
+
+#[cfg(test)]
+#[path = "graph_older_on_server_tests.rs"]
+mod older_on_server_tests;

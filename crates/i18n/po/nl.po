@@ -5896,6 +5896,11 @@ msgid "Leave it empty to look for the server from your address. It must begin wi
 msgstr "Laat het leeg om de server te zoeken aan de hand van uw adres. Het moet beginnen met https://."
 
 #. interface
+#: crates/ui-egui/src/backstage.rs
+msgid "Leave older mail on the server"
+msgstr ""
+
+#. interface
 #: crates/ui-egui/src/sync_panel.rs
 #, fuzzy
 msgid "Leave this account out of this Send/Receive"
@@ -6139,6 +6144,11 @@ msgstr "E-mail in het Postvak UIT van dit gedeelde postvak wacht: verzenden vanu
 #, fuzzy
 msgid "Mail moves and copies between a shared mailbox and its own account's mailboxes only: move it there, or into a folder on this computer"
 msgstr "E-mail kan alleen worden verplaatst en gekopieerd tussen een gedeeld postvak en de postvakken van het eigen account: verplaats die daarnaartoe, of naar een map op deze computer"
+
+#. interface
+#: crates/ui-egui/src/backstage.rs
+msgid "Mail older than this isn't kept on this computer at all, not even its headers, as in Outlook. It stays on the server. The next Send/Receive lists the folders again."
+msgstr ""
 
 #. interface
 #: crates/ui-egui/src/data_removal.rs

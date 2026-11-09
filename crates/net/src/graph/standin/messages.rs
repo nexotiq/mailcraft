@@ -10,9 +10,11 @@
 //!   what changed since: messages new or changed in their state now, and `{"@removed":
 //!   {"reason": "deleted"}, "id"}` for each one deleted or moved out of the folder. A page may be
 //!   short, or empty, and still have a next link.
-//! - The first request may say `$select` (message properties only), `$top`, and `$orderby`
+//! - The first request may say `$select` (message properties only), `$top`, `$orderby`
 //!   (`receivedDateTime desc` only; without it the order is the stand-in's own, oldest first, so
-//!   a client that counts on newest first without asking finds out). A later one says its token
+//!   a client that counts on newest first without asking finds out), and `$filter`
+//!   (`receivedDateTime ge <UTC time>` only, the one filter a message delta supports besides `gt`):
+//!   the round, and every later one from its delta link, has only messages received from then on. A later one says its token
 //!   and nothing else: the token carries the rest. `Prefer: odata.maxpagesize` sets the size of a
 //!   page.
 //! - An `$expand` is answered `400 BadRequest` ("Parsing OData Select and Expand failed"), as
@@ -231,6 +233,22 @@ fn shown(id: &str, immutable: bool) -> String {
     }
 }
 
+/// The received time of `receivedDateTime ge <time>` (or `gt`, a second later), the one filter
+/// a message delta supports.
+fn received_from(filter: &str) -> Option<Timestamp> {
+    let mut words = filter.split_whitespace();
+    let (name, op, time) = (words.next()?, words.next()?, words.next()?);
+    if words.next().is_some() || !name.eq_ignore_ascii_case("receivedDateTime") {
+        return None;
+    }
+    let at = mailcraft_time::iso_to_timestamp(time, 0)?;
+    match op.to_ascii_lowercase().as_str() {
+        "ge" => Some(at),
+        "gt" => Some(at.saturating_add(1)),
+        _ => None,
+    }
+}
+
 /// What a round of a folder's delta goes through, in order.
 #[derive(Clone, Debug)]
 enum Key {
@@ -252,6 +270,8 @@ struct Round {
     select: Option<Vec<String>>,
     newest_first: bool,
     size: bool,
+    /// `$filter=receivedDateTime ge`: only messages received from then on.
+    from: Option<Timestamp>,
 }
 
 /// What a `$deltatoken` stands for: the folder, and the changes it has seen.
@@ -262,6 +282,8 @@ struct Seen {
     select: Option<Vec<String>>,
     newest_first: bool,
     size: bool,
+    /// `$filter=receivedDateTime ge`: only messages received from then on.
+    from: Option<Timestamp>,
 }
 
 /// The stand-in's messages, and the rounds of delta under way.
@@ -409,9 +431,10 @@ impl Mail {
 
     /// The messages of `folder` changed after `since` up to `upto`, and what left it then,
     /// in the order of their changes; or, for a first round, all of its messages.
-    fn keys(&self, folder: &str, since: Option<u64>, upto: u64, newest_first: bool) -> Vec<Key> {
+    fn keys(&self, folder: &str, since: Option<u64>, upto: u64, newest_first: bool, from: Option<Timestamp>) -> Vec<Key> {
+        let within = |m: &Message| from.is_none_or(|from| m.received >= from);
         let mut messages: Vec<&Message> =
-            self.messages.values().filter(|m| m.folder == folder && m.changed <= upto && since.is_none_or(|s| m.changed > s)).collect();
+            self.messages.values().filter(|m| m.folder == folder && m.changed <= upto && since.is_none_or(|s| m.changed > s) && within(m)).collect();
         match since {
             None if newest_first => messages.sort_by(|a, b| b.received.cmp(&a.received).then_with(|| a.id.cmp(&b.id))),
             None => messages.sort_by(|a, b| a.received.cmp(&b.received).then_with(|| a.id.cmp(&b.id))),
@@ -421,7 +444,7 @@ impl Mail {
                 all.extend(
                     self.messages
                         .values()
-                        .filter(|m| m.folder == folder && m.changed <= since && m.read_changed > since && m.read_changed <= upto)
+                        .filter(|m| m.folder == folder && m.changed <= since && m.read_changed > since && m.read_changed <= upto && within(m))
                         .map(|m| (m.read_changed, Key::Read(m.id.clone()))),
                 );
                 all.extend(
@@ -491,7 +514,7 @@ impl State {
                 }
                 let Some(seen) = self.mailbox.seen.get(token).filter(|s| s.folder == folder).cloned() else { return Err(self.expired()) };
                 let upto = self.mailbox.changes;
-                let keys = self.mailbox.keys(&folder, Some(seen.upto), upto, seen.newest_first);
+                let keys = self.mailbox.keys(&folder, Some(seen.upto), upto, seen.newest_first, seen.from);
                 Round {
                     folder: folder.clone(),
                     upto,
@@ -501,11 +524,14 @@ impl State {
                     select: seen.select,
                     newest_first: seen.newest_first,
                     size: seen.size,
+                    from: seen.from,
                 }
             }
             _ => {
-                if let Some((other, _)) =
-                    asked.query.iter().find(|(name, _)| !matches!(name.as_str(), "$select" | "$top" | "$orderby" | "$deltatoken" | "$expand"))
+                if let Some((other, _)) = asked
+                    .query
+                    .iter()
+                    .find(|(name, _)| !matches!(name.as_str(), "$select" | "$top" | "$orderby" | "$deltatoken" | "$expand" | "$filter"))
                 {
                     return Err(bad(format!("The query parameter '{other}' is not one this stand-in answers for a message delta.")));
                 }
@@ -537,9 +563,16 @@ impl State {
                         "Parsing OData Select and Expand failed: Value cannot be null. (Parameter 'initialState')",
                     ));
                 }
+                let from = match asked.param("$filter") {
+                    None => None,
+                    Some(filter) => Some(
+                        received_from(filter)
+                            .ok_or_else(|| bad("The only filter a message delta supports is 'receivedDateTime ge' (or 'gt') a time."))?,
+                    ),
+                };
                 let upto = self.mailbox.changes;
-                let keys = self.mailbox.keys(&folder, None, upto, newest_first);
-                Round { folder: folder.clone(), upto, keys: Arc::new(keys), at: 0, page, select, newest_first, size: false }
+                let keys = self.mailbox.keys(&folder, None, upto, newest_first, from);
+                Round { folder: folder.clone(), upto, keys: Arc::new(keys), at: 0, page, select, newest_first, size: false, from }
             }
         };
         // The page size: what `Prefer` says, else what the first request said, within limits.
@@ -554,8 +587,14 @@ impl State {
         let mut list = json!({"@odata.context": format!("{}/v1.0/$metadata#Collection(message)", self.base), "value": value});
         if done && self.mailbox.replays == 0 {
             let token = self.mailbox.token();
-            let seen =
-                Seen { folder: folder.clone(), upto: round.upto, select: round.select.clone(), newest_first: round.newest_first, size: round.size };
+            let seen = Seen {
+                folder: folder.clone(),
+                upto: round.upto,
+                select: round.select.clone(),
+                newest_first: round.newest_first,
+                size: round.size,
+                from: round.from,
+            };
             self.mailbox.seen.insert(token.clone(), seen);
             list["@odata.deltaLink"] = json!(format!("{base}?$deltatoken={token}"));
         } else {
